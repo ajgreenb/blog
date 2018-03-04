@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width">
+
+  <title>Debugging a webpack project</title>
+
+  <link href="style.css" rel="stylesheet">
+  <link href="post.css" rel="stylesheet">
+</head>
+<body>
+
+<h1>
+Debugging a Python script
+</h1>
+
+<span class="date">
+March 3, 2018
+</span>
+
+<p>
+The other night I wrote a Python script to group my
+<a href="https://scripted.org">ScriptEd</a> students into 5 tables. I wanted the
+groupings to be random, but I wanted both males and females to be equally
+distributed at each table&mdash;or at least, as close as possible, since we have
+a few more males than females.
+</p>
+
+<p>
+My first iteration of the script looked like this:
+</p>
+
+<div class="code">
+<pre>
+from random import shuffle
+
+NUM_GROUPS = 5
+
+MALES = [
+  'M1',
+  'M2',
+  'M3',
+  'M4',
+  'M5',
+  'M6',
+  'M7',
+  'M8',
+  'M9',
+]
+
+FEMALES = [
+  'F1',
+  'F2',
+  'F3',
+  'F4',
+  'F5',
+  'F6',
+  'F7',
+]
+
+shuffle(MALES)
+shuffle(FEMALES)
+
+groups = [ [] ] * NUM_GROUPS
+
+for i in range(len(MALES) + len(FEMALES)):
+  if i % 2 == 0 and FEMALES:
+    groups[i % NUM_GROUPS].append(FEMALES.pop())
+  else:
+    groups[i % NUM_GROUPS].append(MALES.pop())
+
+print(groups)
+</pre>
+</div>
+
+<p>
+Nothing <em>too</em> complicated&mdash;loop through the total number of
+students, and if the current index is even and there are unplaced females, place
+one of them in the current group. Otherwise, place a male in the current group.
+</p>
+
+<p>
+This script breaks when the number of groups to assign is even, since the
+assignment logic uses modular arithmetic that will always assign the males and
+females to separate groups. But, since I was using an odd number of groups, I
+didn&apos;t have to worry about that problem.
+</p>
+
+<p>
+Aside from that, though, I had introduced a separate bug. The output from
+running that script looks something like this (newlines and indentation added
+for clarity):
+</p>
+
+<div class="code">
+<pre>
+[
+  [ 'F7', 'M4', 'F3', 'M7', 'F4', 'M6', 'F5', 'M3', 'F1', 'M2', 'F2', 'M5', 'F6', 'M8', 'M1', 'M9' ],
+  [ 'F7', 'M4', 'F3', 'M7', 'F4', 'M6', 'F5', 'M3', 'F1', 'M2', 'F2', 'M5', 'F6', 'M8', 'M1', 'M9' ],
+  [ 'F7', 'M4', 'F3', 'M7', 'F4', 'M6', 'F5', 'M3', 'F1', 'M2', 'F2', 'M5', 'F6', 'M8', 'M1', 'M9' ],
+  [ 'F7', 'M4', 'F3', 'M7', 'F4', 'M6', 'F5', 'M3', 'F1', 'M2', 'F2', 'M5', 'F6', 'M8', 'M1', 'M9' ],
+  [ 'F7', 'M4', 'F3', 'M7', 'F4', 'M6', 'F5', 'M3', 'F1', 'M2', 'F2', 'M5', 'F6', 'M8', 'M1', 'M9' ]
+]
+</pre>
+</div>
+
+<p>
+Each group had <em>all</em> the students in it! I combed through each line of
+code several times, unable to figure out how this was happening. Because the
+code is simple&mdash;the main looping and assignment logic is only 5 lines
+&mdash;I started thinking truly farfetched thoughts: had I somehow corrupted my
+Python build?
+</p>
+
+<p>
+Stumped, I set the script aside and left to cycle my laundry. As it often
+happens, while walking to the laundromat, an idea popped into my head. As soon
+as I got back, I tested my idea and it worked. Here&apos;s the problematic line:
+</p>
+
+
+<div class="code">
+<pre>
+groups = [ [] ] * NUM_GROUPS
+</pre>
+</div>
+
+<p>
+I expected <code>[ [] ] * NUM_GROUPS</code> to create a list containing 5
+different empty lists. Instead, that line of code creates a list containing 5
+<em>references</em> to a <em>single</em> list. When adding a member to the first
+list, <em>all</em> lists received the member, because there was only a single
+underlying Python object for that list.
+</p>
+
+<p>
+Curious to understand the underlying implementation responsible for this
+behavior, I dug into the source code for the Python interpreter. Since the
+problematic line of code involves multiplying a list by a number, here&apos;s
+the routine Python uses for multiplying two things (excerpted from
+<a href="https://github.com/python/cpython/blob/f320be77ffb73e3b9e7fc98c37b8df3975d84b40/Objects/abstract.c#L982-L999">
+abstract.c</a>):
+</p>
+
+<div class="code">
+<pre>
+PyObject *
+PyNumber_Multiply(PyObject *v, PyObject *w)
+{
+    PyObject *result = binary_op1(v, w, NB_SLOT(nb_multiply));
+    if (result == Py_NotImplemented) {
+        PySequenceMethods *mv = v->ob_type->tp_as_sequence;
+        PySequenceMethods *mw = w->ob_type->tp_as_sequence;
+        Py_DECREF(result);
+        if  (mv && mv->sq_repeat) {
+            return sequence_repeat(mv->sq_repeat, v, w);
+        }
+        else if (mw && mw->sq_repeat) {
+            return sequence_repeat(mw->sq_repeat, w, v);
+        }
+        result = binop_type_error(v, w, "*");
+    }
+    return result;
+}
+</pre>
+</div>
+
+<p>
+It attempts to multiply the two objects using <code>binary_op1</code>. If that
+returns <code>Py_NotImplemented</code> (and it will for a Python list object),
+it tries using <code>sequence_repeat</code>. For a list object,
+<a href="https://github.com/python/cpython/blob/13cfd57dcf58485d6242fd8118c6ea4b10e29aab/Objects/listobject.c#L2700">
+<code>sequence_repeat</code> maps to <code>list_repeat</code>.</a> Here&apos;s
+the relevant part of the implementation for <code>list_repeat</code> (excerpted
+from
+<a href="https://github.com/python/cpython/blob/13cfd57dcf58485d6242fd8118c6ea4b10e29aab/Objects/listobject.c#L523-L531">
+listobject.c</a>):
+</p>
+
+<div class="code">
+<pre>
+items = np-&gt;ob_item;
+if (Py_SIZE(a) == 1) {
+    elem = a-&gt;ob_item[0];
+    for (i = 0; i &lt; n; i++) {
+        items[i] = elem;
+        Py_INCREF(elem);
+    }
+    return (PyObject *) np;
+}
+</pre>
+</div>
+
+<p>
+A couple quick definitions:
+</p>
+
+<ul>
+<li>
+<code>a</code> is the list that will be repeated.
+</li>
+<li>
+<code>np</code> is the new, repeated version of <code>a</code>.
+</li>
+<li>
+<code>items</code> is a reference to the objects contained by <code>np</code>.
+</li>
+<li>
+<code>elem</code> is a reference to the first (and only) object in
+<code>a</code>.
+</li>
+<li>
+<code>n</code> is the number of times to repeat the list.
+</li>
+</ul>
+
+<p>
+You can see in the line <code>items[i] = elem;</code> that each slot in the new,
+repeated list points to the same singular <code>elem</code>. The
+<code>Py_INCREF</code> line says it all: each time the repeated element is added
+to the new list, Python increments the reference count for that object.
+</p>
+
+<p>
+Fixing the behavior required ensuring that <code>groups</code> contained a list
+of separate lists, rather than a list of references to the same list.
+</p>
+
+<div class="code">
+<pre>
+groups = [ [], [], [], [], [] ]
+</pre>
+</div>
+
+</body>
+</html>
